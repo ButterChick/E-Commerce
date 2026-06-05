@@ -16,7 +16,6 @@ conn = psycopg2.connect(
 
 cursor = conn.cursor()
 
-
 tiers = ["standard", "silver", "gold", "platinum"]
 
 for _ in range(100):
