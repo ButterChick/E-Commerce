@@ -46,6 +46,7 @@ def extract_orders(spark: SparkSession, filepath: str) -> DataFrame:
 
     df = df.withColumn("quantity", F.col("quantity").cast("integer"))
     df = df.withColumn("unit_price", F.col("unit_price").cast("double"))
+    df = df.withColumn("order_date", F.to_date("order_date", "yyyy-MM-dd"))
 
     return df
 

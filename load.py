@@ -180,11 +180,11 @@ def load_fact_order_items(
             channel, etl_run_id
         )
         SELECT
-            order_item_id, order_id, order_date::DATE,
-            customer_id, customer_tier, customer_country,
-            product_id, product_category,
-            quantity, unit_price, unit_cost,
-            gross_revenue, gross_margin, margin_pct,
+            order_item_id::BIGINT, order_id::BIGINT, order_date::DATE,
+            customer_id::BIGINT, customer_tier, customer_country,
+            product_id::BIGINT, product_category,
+            quantity::INTEGER, unit_price::NUMERIC, unit_cost::NUMERIC,
+            gross_revenue::NUMERIC, gross_margin::NUMERIC, margin_pct::NUMERIC,
             channel, etl_run_id
         FROM {staging_table}
         ON CONFLICT (order_item_id) DO UPDATE SET
