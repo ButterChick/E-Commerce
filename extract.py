@@ -1,8 +1,12 @@
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.types import LongType
+from pyspark.sql.window import Window
+from pyspark.sql import functions as F
 import uuid
 import os
+import re
+from load import run_all_loads
 os.environ["HADOOP_HOME"] = r"C:\hadoop"
 os.environ["PATH"] = os.environ["PATH"] + r";C:\hadoop\bin"
 
@@ -13,13 +17,11 @@ os.environ["PATH"] = os.environ["PATH"] + r";C:\hadoop\bin"
 def get_spark(app_name: str = "ecommerce_etl") -> SparkSession:
     """
     Get or create a local SparkSession.
-    In production, remove the master("local[*]") line and let the
-    cluster config inject it via spark-submit.
     """
     return (
         SparkSession.builder
         .appName(app_name)
-        .master("local[*]")
+        .master("local[*]") #This is used for local machine, ie used when database on the same machine
         .config("spark.jars", r"C:\Program Files\PostgreSQL\postgresql-42.7.11.jar")
         .getOrCreate()
     )
@@ -33,7 +35,7 @@ def extract_orders(spark: SparkSession, filepath: str) -> DataFrame:
     Read orders CSV and cast ID columns to LongType (nullable).
 
     Args:
-        spark: Active SparkSession.
+        spark:    Active SparkSession.
         filepath: Path to the orders CSV file.
 
     Returns:
@@ -90,7 +92,6 @@ def extract_products(spark: SparkSession, jdbc_url: str, jdbc_props: dict) -> Da
 # Fields that must be non-null for a row to be valid
 _CRITICAL_FIELDS = ("order_item_id", "order_id", "order_date", "customer_id", "product_id")
 
-
 def transform(
     orders: DataFrame,
     customers: DataFrame,
@@ -118,7 +119,6 @@ def transform(
     Returns:
         Cleaned, enriched Spark DataFrame ready for write_parquet().
     """
-    from pyspark.sql.window import Window
 
     # --- 1. Drop nulls on critical fields ---
     null_filter = F.col(_CRITICAL_FIELDS[0]).isNotNull()
@@ -227,7 +227,6 @@ def write_parquet(fact: DataFrame, partition_date: str, base_path: str = "data/p
     Returns:
         Dict with keys 'fact_path' and 'summary_path'.
     """
-    from pyspark.sql import functions as F
 
     fact_path    = f"{base_path}/dt={partition_date}/fact"
     summary_path = f"{base_path}/dt={partition_date}/summary"
@@ -262,8 +261,6 @@ def write_parquet(fact: DataFrame, partition_date: str, base_path: str = "data/p
     print(f"[write_parquet] Summary written to {summary_path}")
 
     return {"fact_path": fact_path, "summary_path": summary_path}
-
-
 
 # -------------------------
 # ORCHESTRATOR
@@ -305,11 +302,8 @@ def run_pipeline(
     Returns:
         Transformed Spark DataFrame (also persisted to Parquet and warehouse).
     """
-    import re
-    from load import run_all_loads
-
+    
     spark = get_spark()
-
     # --- Partition date ---
     match = re.search(r"dt=(\d{4}-\d{2}-\d{2})", orders_filepath)
     partition_date = match.group(1) if match else None

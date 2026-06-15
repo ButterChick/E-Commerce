@@ -44,7 +44,6 @@ def _get_conn(dw: dict) -> psycopg2.extensions.connection:
         password=dw["password"],
     )
 
-
 # -------------------------
 # READ PARQUET
 # -------------------------
@@ -58,20 +57,19 @@ def read_parquet(spark: SparkSession, fact_path: str, summary_path: str) -> tupl
 
     Args:
         spark:        Active SparkSession.
-        fact_path:    Path to the fact Parquet directory (e.g. data/processed/dt=.../fact).
+        fact_path:    Path to the fact Parquet directory
         summary_path: Path to the summary Parquet directory.
 
     Returns:
         Tuple of (fact DataFrame, summary DataFrame).
     """
-    fact    = spark.read.parquet(fact_path)
+    fact = spark.read.parquet(fact_path)
     summary = spark.read.parquet(summary_path)
 
-    print(f"[read_parquet] Fact rows:    {fact.count()}")
+    print(f"[read_parquet] Fact rows: {fact.count()}")
     print(f"[read_parquet] Summary rows: {summary.count()}")
 
     return fact, summary
-
 
 # -------------------------
 # VALIDATE
@@ -87,7 +85,7 @@ def validate(fact: DataFrame, partition_date: str) -> None:
       3. All non-null margin_pct values fall within [-100, 100].
 
     Args:
-        fact:           Fact DataFrame read back from Parquet after loading.
+        fact: Fact DataFrame read back from Parquet after loading.
         partition_date: 'YYYY-MM-DD' string — only rows for this date are checked.
 
     Raises:
@@ -127,7 +125,6 @@ def validate(fact: DataFrame, partition_date: str) -> None:
         )
     print(f"[validate] All margin_pct values in [-100, 100]. OK.")
 
-
 # -------------------------
 # LOAD: fact_order_items
 # -------------------------
@@ -139,7 +136,7 @@ def load_fact_order_items(
     dw: dict,
 ) -> int:
     """
-    Upsert fact_order_items rows into the warehouse.
+    Insert fact_order_items rows into the warehouse.
 
     Strategy: write the batch to a temp table via JDBC, then run a single
     INSERT ... ON CONFLICT (order_item_id) DO UPDATE in psycopg2 to merge
@@ -150,10 +147,10 @@ def load_fact_order_items(
     and is NOT updated on conflict (existing timestamps are preserved).
 
     Args:
-        fact:       Transformed DataFrame read from Parquet.
-        jdbc_url:   JDBC connection string for the warehouse DB.
+        fact: Transformed DataFrame read from Parquet.
+        jdbc_url: JDBC connection string for the warehouse DB.
         jdbc_props: Dict with 'user', 'password', 'driver'.
-        dw:         Dict with host, port, db, user, password for psycopg2.
+        dw: Dict with host, port, db, user, password for psycopg2.
 
     Returns:
         Number of rows upserted.
@@ -284,7 +281,6 @@ def load_daily_category_sales(
     print(f"[daily_category_sales] Inserted {row_count} rows for {partition_date}.")
     return row_count
 
-
 # -------------------------
 # LOAD: etl_run_log
 # -------------------------
@@ -320,7 +316,6 @@ def log_run_start(
         conn.close()
 
     print(f"[etl_run_log] Run {run_id} started.")
-
 
 def log_run_end(
     dw: dict,
@@ -361,7 +356,6 @@ def log_run_end(
 
     print(f"[etl_run_log] Run {run_id} → {status} "
           f"(extracted={rows_extracted}, loaded={rows_loaded}).")
-
 
 # -------------------------
 # ORCHESTRATED LOAD
