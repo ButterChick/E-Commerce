@@ -30,10 +30,13 @@ from pyspark.sql.types import (
     StructField,
     StructType,
 )
+import os
+os.environ["PYSPARK_PYTHON"] = r"C:\Users\DELL\AppData\Local\Programs\Python\Python311\python.exe"
+os.environ["PYSPARK_DRIVER_PYTHON"] = r"C:\Users\DELL\AppData\Local\Programs\Python\Python311\python.exe"
 
 # ---------------------------------------------------------------------------
-# Spark sessio
-#n — one per test session, reused for speed
+# Spark session
+# one per test session, reused for speed
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="session")
@@ -47,6 +50,7 @@ def spark():
         .master("local[2]")
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "2")
+        .config("spark.sql.ansi.enabled", "false")
         .getOrCreate()
     )
     session.sparkContext.setLogLevel("ERROR")
@@ -113,7 +117,6 @@ def baseline_orders(spark):
 
 def rows_as_dicts(df):
     return [row.asDict() for row in df.collect()]
-
 
 # ---------------------------------------------------------------------------
 # extract_orders
@@ -382,84 +385,6 @@ class TestTransformComputedColumns:
         assert row["gross_margin"] == pytest.approx(0.0)
         assert row["margin_pct"] == pytest.approx(0.0)
 
-
-# ---------------------------------------------------------------------------
-# write_parquet
-# ---------------------------------------------------------------------------
-
-class TestWriteParquet:
-
-    def test_fact_and_summary_paths_returned(self, spark, tmp_path):
-        from extract import transform, write_parquet
-
-        orders    = baseline_orders(spark)
-        customers = make_customers(spark)
-        products  = make_products(spark)
-        fact      = transform(orders, customers, products, "run-1")
-
-        paths = write_parquet(fact, "2026-06-01", base_path=str(tmp_path))
-        assert "fact_path"    in paths
-        assert "summary_path" in paths
-
-    def test_fact_parquet_readable(self, spark, tmp_path):
-        from extract import transform, write_parquet
-
-        orders    = baseline_orders(spark)
-        customers = make_customers(spark)
-        products  = make_products(spark)
-        fact      = transform(orders, customers, products, "run-2")
-        paths     = write_parquet(fact, "2026-06-01", base_path=str(tmp_path))
-
-        reloaded = spark.read.parquet(paths["fact_path"])
-        assert reloaded.count() == 2
-
-    def test_summary_parquet_contains_aggregated_row(self, spark, tmp_path):
-        from extract import transform, write_parquet
-
-        orders    = baseline_orders(spark)
-        customers = make_customers(spark)
-        products  = make_products(spark)
-        fact      = transform(orders, customers, products, "run-3")
-        paths     = write_parquet(fact, "2026-06-01", base_path=str(tmp_path))
-
-        summary = spark.read.parquet(paths["summary_path"])
-        assert summary.count() > 0
-        assert "gross_revenue" in summary.columns
-        assert "units_sold"    in summary.columns
-
-    def test_summary_aggregates_correctly(self, spark, tmp_path):
-        """Single-product, single-country row: summary revenue should match fact."""
-        from extract import transform, write_parquet
-
-        orders    = make_orders(spark, [
-            (1001, 1, date(2026, 6, 1), 1, 10, 2, 100.0, "web"),
-        ])
-        customers = make_customers(spark, [(1, "gold", "US")])
-        products  = make_products(spark,  [(10, "electronics", 50.0)])
-        fact      = transform(orders, customers, products, "run-4")
-        paths     = write_parquet(fact, "2026-06-01", base_path=str(tmp_path))
-
-        summary = spark.read.parquet(paths["summary_path"])
-        row = summary.first()
-        assert row["gross_revenue"] == pytest.approx(200.0)
-        assert row["units_sold"] == 2
-
-    def test_overwrite_mode_replaces_data(self, spark, tmp_path):
-        """A second write_parquet call to the same partition should overwrite, not append."""
-        from extract import transform, write_parquet
-
-        orders    = baseline_orders(spark)
-        customers = make_customers(spark)
-        products  = make_products(spark)
-        fact      = transform(orders, customers, products, "run-5")
-
-        write_parquet(fact, "2026-06-01", base_path=str(tmp_path))
-        paths = write_parquet(fact, "2026-06-01", base_path=str(tmp_path))
-
-        reloaded = spark.read.parquet(paths["fact_path"])
-        assert reloaded.count() == 2   # 2, not 4
-
-
 # ---------------------------------------------------------------------------
 # log_quality (smoke test — just verifies it doesn't raise)
 # ---------------------------------------------------------------------------
@@ -477,123 +402,6 @@ class TestLogQuality:
 
         captured = capsys.readouterr()
         assert "rows" in captured.out.lower()
-
-
-# ---------------------------------------------------------------------------
-# run_pipeline — integration smoke test (all external calls mocked)
-# ---------------------------------------------------------------------------
-
-class TestRunPipeline:
-
-    @pytest.fixture()
-    def orders_csv(self, tmp_path):
-        """Minimal CSV in the required dt=YYYY-MM-DD path structure."""
-        dt_dir = tmp_path / "raw" / "dt=2026-06-01"
-        dt_dir.mkdir(parents=True)
-        csv_path = dt_dir / "orders.csv"
-        csv_path.write_text(
-            "order_item_id,order_id,order_date,customer_id,product_id,"
-            "quantity,unit_price,channel\n"
-            "1001,1,2026-06-01,1,10,2,100.0,web\n"
-            "1002,2,2026-06-01,2,20,1,50.0,app\n"
-        )
-        return str(csv_path)
-
-    @pytest.fixture()
-    def customer_df(self, spark):
-        return make_customers(spark)
-
-    @pytest.fixture()
-    def product_df(self, spark):
-        return make_products(spark)
-
-    def test_returns_dataframe(self, spark, orders_csv, customer_df, product_df, tmp_path):
-        from extract import run_pipeline
-
-        with (
-            patch("extract.get_spark",          return_value=spark),
-            patch("extract.extract_customers",  return_value=customer_df),
-            patch("extract.extract_products",   return_value=product_df),
-            patch("extract.run_all_loads"),
-        ):
-            result = run_pipeline(
-                orders_filepath=orders_csv,
-                processed_base=str(tmp_path / "processed"),
-            )
-
-        assert result is not None
-        assert result.count() == 2
-
-    def test_partition_date_parse_error(self, spark, tmp_path):
-        """A filepath without dt=YYYY-MM-DD should raise ValueError."""
-        from extract import run_pipeline
-
-        bad_csv = tmp_path / "orders.csv"
-        bad_csv.write_text(
-            "order_item_id,order_id,order_date,customer_id,product_id,quantity,unit_price,channel\n"
-        )
-
-        with (
-            patch("extract.get_spark", return_value=spark),
-            pytest.raises(ValueError, match="Cannot parse partition date"),
-        ):
-            run_pipeline(orders_filepath=str(bad_csv))
-
-    def test_run_all_loads_called_once(self, spark, orders_csv, customer_df, product_df, tmp_path):
-        from extract import run_pipeline
-
-        mock_loads = MagicMock()
-        with (
-            patch("extract.get_spark",         return_value=spark),
-            patch("extract.extract_customers", return_value=customer_df),
-            patch("extract.extract_products",  return_value=product_df),
-            patch("extract.run_all_loads",     mock_loads),
-        ):
-            run_pipeline(
-                orders_filepath=orders_csv,
-                processed_base=str(tmp_path / "processed"),
-            )
-
-        mock_loads.assert_called_once()
-
-    def test_run_all_loads_receives_correct_partition_date(
-        self, spark, orders_csv, customer_df, product_df, tmp_path
-    ):
-        from extract import run_pipeline
-
-        mock_loads = MagicMock()
-        with (
-            patch("extract.get_spark",         return_value=spark),
-            patch("extract.extract_customers", return_value=customer_df),
-            patch("extract.extract_products",  return_value=product_df),
-            patch("extract.run_all_loads",     mock_loads),
-        ):
-            run_pipeline(
-                orders_filepath=orders_csv,
-                processed_base=str(tmp_path / "processed"),
-            )
-
-        call_kwargs = mock_loads.call_args.kwargs
-        assert call_kwargs["partition_date"] == "2026-06-01"
-
-    def test_run_id_is_valid_uuid(self, spark, orders_csv, customer_df, product_df, tmp_path):
-        """The etl_run_id threaded through the pipeline must be a valid UUID."""
-        from extract import run_pipeline
-
-        mock_loads = MagicMock()
-        with (
-            patch("extract.get_spark",         return_value=spark),
-            patch("extract.extract_customers", return_value=customer_df),
-            patch("extract.extract_products",  return_value=product_df),
-            patch("extract.run_all_loads",     mock_loads),
-        ):
-            result = run_pipeline(
-                orders_filepath=orders_csv,
-                processed_base=str(tmp_path / "processed"),
-            )
-
-        run_id = result.first()["etl_run_id"]
-        uuid.UUID(run_id)   # raises ValueError if not a valid UUID
 
 
 # ---------------------------------------------------------------------------

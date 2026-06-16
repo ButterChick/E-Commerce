@@ -19,10 +19,9 @@ from __future__ import annotations
 
 import os
 from datetime import date
-from unittest.mock import MagicMock, patch, PropertyMock
-
+from unittest.mock import MagicMock, PropertyMock, patch
 import pytest
-from pyspark.sql import SparkSession
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.types import (
     DateType,
     DoubleType,
@@ -53,7 +52,6 @@ def spark():
     session.sparkContext.setLogLevel("ERROR")
     yield session
     session.stop()
-
 
 # ---------------------------------------------------------------------------
 # Schema + DataFrame factory helpers
@@ -89,7 +87,6 @@ SUMMARY_SCHEMA = StructType([
     StructField("avg_order_value",   DoubleType(),  True),
 ])
 
-
 def make_fact(spark, rows=None):
     if rows is None:
         rows = [
@@ -100,7 +97,6 @@ def make_fact(spark, rows=None):
         ]
     return spark.createDataFrame(rows, schema=FACT_SCHEMA)
 
-
 def make_summary(spark, rows=None):
     if rows is None:
         rows = [
@@ -108,7 +104,6 @@ def make_summary(spark, rows=None):
             (date(2026, 6, 1), "apparel",     "UK", 1, 1,  50.0,  35.0,  50.0),
         ]
     return spark.createDataFrame(rows, schema=SUMMARY_SCHEMA)
-
 
 DW = {
     "host": "localhost",
@@ -120,6 +115,16 @@ DW = {
 JDBC_URL   = "jdbc:postgresql://localhost:5432/ecommerce_dw"
 JDBC_PROPS = {"user": "postgres", "password": "admin", "driver": "org.postgresql.Driver"}
 
+# ---------------------------------------------------------------------------
+# Helper: build a mock writer to substitute for DataFrame.write
+# ---------------------------------------------------------------------------
+
+def _make_mock_writer():
+    """Return a MagicMock that behaves like a DataFrameWriter."""
+    writer = MagicMock()
+    writer.jdbc = MagicMock()
+    return writer
+
 
 # ---------------------------------------------------------------------------
 # read_parquet
@@ -130,8 +135,9 @@ class TestReadParquet:
     def test_returns_two_dataframes(self, spark, tmp_path):
         from load import read_parquet
 
-        fact_path    = str(tmp_path / "fact")
-        summary_path = str(tmp_path / "summary")
+        # Use as_posix() so the JVM receives forward-slash paths on Windows
+        fact_path    = (tmp_path / "fact").as_posix()
+        summary_path = (tmp_path / "summary").as_posix()
         make_fact(spark).write.mode("overwrite").parquet(fact_path)
         make_summary(spark).write.mode("overwrite").parquet(summary_path)
 
@@ -142,8 +148,8 @@ class TestReadParquet:
     def test_fact_columns_preserved(self, spark, tmp_path):
         from load import read_parquet
 
-        fact_path    = str(tmp_path / "fact")
-        summary_path = str(tmp_path / "summary")
+        fact_path    = (tmp_path / "fact").as_posix()
+        summary_path = (tmp_path / "summary").as_posix()
         make_fact(spark).write.mode("overwrite").parquet(fact_path)
         make_summary(spark).write.mode("overwrite").parquet(summary_path)
 
@@ -172,7 +178,6 @@ class TestValidate:
 
     def test_empty_partition_raises(self, spark):
         from load import validate
-        # Use a date that has no rows
         with pytest.raises(ValueError, match="COUNT\\(\\*\\) = 0"):
             validate(make_fact(spark), "2025-01-01")
 
@@ -241,10 +246,8 @@ class TestValidate:
         """Rows from a different date with bad margin_pct must not trigger failure."""
         from load import validate
         rows = [
-            # Good row for the partition under test
             (1001, 1, date(2026, 6, 1), 1, "gold", "US",
              10, "electronics", 2, 100.0, 50.0, 200.0, 100.0, 50.0, "web", "run-1"),
-            # Bad margin_pct on a DIFFERENT date — should be ignored
             (1002, 2, date(2026, 5, 1), 2, "silver", "UK",
              20, "apparel",     1,  50.0, 15.0,  50.0,  35.0, 999.0, "app", "run-1"),
         ]
@@ -258,11 +261,9 @@ class TestValidate:
 
 class TestLoadFactOrderItems:
     """
-    JDBC writes and psycopg2 are mocked. Tests verify:
-      - staging write is called with 'overwrite' mode
-      - the upsert SQL targets the correct tables
-      - the staging table is dropped after upsert
-      - the row count returned is whatever psycopg2 reports
+    JDBC writes and psycopg2 are mocked. DataFrame.write is patched at the
+    class level using PropertyMock to avoid the 'property has no deleter'
+    error that occurs when patching it on an instance.
     """
 
     def _run(self, spark, mock_conn, rowcount=2):
@@ -280,12 +281,13 @@ class TestLoadFactOrderItems:
         mock_conn.return_value = mock_conn_inst
 
         fact = make_fact(spark)
+        mock_writer = _make_mock_writer()
 
-        with patch.object(fact, "write") as mock_write:
-            mock_write.jdbc = MagicMock()
+        # Patch write at the class level; restore automatically on exit
+        with patch.object(DataFrame, "write", new_callable=PropertyMock, return_value=mock_writer):
             result = load_fact_order_items(fact, JDBC_URL, JDBC_PROPS, DW)
 
-        return result, mock_write, mock_cur
+        return result, mock_writer, mock_cur
 
     @patch("load._get_conn")
     def test_returns_rowcount_from_cursor(self, mock_conn, spark):
@@ -294,9 +296,9 @@ class TestLoadFactOrderItems:
 
     @patch("load._get_conn")
     def test_jdbc_write_uses_overwrite_mode(self, mock_conn, spark):
-        _, mock_write, _ = self._run(spark, mock_conn)
-        call_kwargs = mock_write.jdbc.call_args
-        assert call_kwargs.kwargs.get("mode") == "overwrite" or "overwrite" in call_kwargs.args
+        _, mock_writer, _ = self._run(spark, mock_conn)
+        call = mock_writer.jdbc.call_args
+        assert call.kwargs.get("mode") == "overwrite" or "overwrite" in call.args
 
     @patch("load._get_conn")
     def test_upsert_sql_targets_fact_table(self, mock_conn, spark):
@@ -346,19 +348,19 @@ class TestLoadDailyCategorySales:
         mock_conn.return_value = mock_conn_inst
 
         summary = make_summary(spark)
+        mock_writer = _make_mock_writer()
 
-        with patch.object(summary, "write") as mock_write:
-            mock_write.jdbc = MagicMock()
+        with patch.object(DataFrame, "write", new_callable=PropertyMock, return_value=mock_writer):
             result = load_daily_category_sales(
                 summary, JDBC_URL, JDBC_PROPS, DW, self.PARTITION, self.RUN_ID
             )
 
-        return result, mock_write, mock_cur
+        return result, mock_writer, mock_cur
 
     @patch("load._get_conn")
     def test_returns_row_count(self, mock_conn, spark):
         result, _, _ = self._run(spark, mock_conn)
-        assert result == 2   # matches make_summary default rows
+        assert result == 2
 
     @patch("load._get_conn")
     def test_delete_issued_before_insert(self, mock_conn, spark):
@@ -370,21 +372,19 @@ class TestLoadDailyCategorySales:
     def test_delete_uses_partition_date_param(self, mock_conn, spark):
         _, _, mock_cur = self._run(spark, mock_conn)
         first_call = mock_cur.execute.call_args_list[0]
-        # Second positional arg is the params tuple
         params = first_call.args[1] if len(first_call.args) > 1 else first_call.kwargs.get("vars")
         assert self.PARTITION in params
 
     @patch("load._get_conn")
     def test_jdbc_append_used_for_insert(self, mock_conn, spark):
-        _, mock_write, _ = self._run(spark, mock_conn)
-        call_kwargs = mock_write.jdbc.call_args
-        assert call_kwargs.kwargs.get("mode") == "append" or "append" in call_kwargs.args
+        _, mock_writer, _ = self._run(spark, mock_conn)
+        call = mock_writer.jdbc.call_args
+        assert call.kwargs.get("mode") == "append" or "append" in call.args
 
     @patch("load._get_conn")
     def test_etl_run_id_column_added_to_summary(self, mock_conn, spark):
         """summary DataFrame must have etl_run_id column added before write."""
         from load import load_daily_category_sales
-        import pyspark.sql.functions as F
 
         mock_cur = MagicMock()
         mock_cur.__enter__ = lambda s: s
@@ -398,26 +398,13 @@ class TestLoadDailyCategorySales:
         mock_conn.return_value = mock_conn_inst
 
         summary = make_summary(spark)
-        captured = {}
+        mock_writer = _make_mock_writer()
 
-        def capture_jdbc(**kwargs):
-            captured["df"] = kwargs.get("table")  # we'll inspect via the write mock
-
-        # Intercept the DataFrame passed to .write.jdbc to check its columns
-        written_dfs = []
-        original_jdbc = None
-
-        class WriteMock:
-            def jdbc(self, *args, **kwargs):
-                pass
-
-        with patch.object(summary.__class__, "withColumn", wraps=summary.withColumn) as mock_wc:
-            with patch.object(summary, "write") as mock_write:
-                mock_write.jdbc = MagicMock()
+        with patch.object(DataFrame, "write", new_callable=PropertyMock, return_value=mock_writer):
+            with patch.object(DataFrame, "withColumn", wraps=summary.withColumn) as mock_wc:
                 load_daily_category_sales(
                     summary, JDBC_URL, JDBC_PROPS, DW, self.PARTITION, self.RUN_ID
                 )
-            # withColumn should have been called with "etl_run_id"
             call_args = [c.args[0] for c in mock_wc.call_args_list]
             assert "etl_run_id" in call_args
 
@@ -425,6 +412,7 @@ class TestLoadDailyCategorySales:
     def test_undefined_table_error_is_swallowed(self, mock_conn, spark):
         """If the target table doesn't exist yet, the DELETE should not crash."""
         import psycopg2.errors
+        from load import load_daily_category_sales
 
         mock_cur = MagicMock()
         mock_cur.__enter__ = lambda s: s
@@ -438,8 +426,9 @@ class TestLoadDailyCategorySales:
         mock_conn.return_value = mock_conn_inst
 
         summary = make_summary(spark)
-        with patch.object(summary, "write") as mock_write:
-            mock_write.jdbc = MagicMock()
+        mock_writer = _make_mock_writer()
+
+        with patch.object(DataFrame, "write", new_callable=PropertyMock, return_value=mock_writer):
             # Should not raise
             load_daily_category_sales(
                 summary, JDBC_URL, JDBC_PROPS, DW, self.PARTITION, self.RUN_ID
@@ -619,20 +608,13 @@ class TestRunAllLoads:
 
     @pytest.fixture()
     def parquet_paths(self, spark, tmp_path):
-        fact_path    = str(tmp_path / "fact")
-        summary_path = str(tmp_path / "summary")
+        # as_posix() gives the JVM forward-slash paths, avoiding Windows
+        # ChangeFileModeByMask errors from backslash-escaped paths.
+        fact_path    = (tmp_path / "fact").as_posix()
+        summary_path = (tmp_path / "summary").as_posix()
         make_fact(spark).write.mode("overwrite").parquet(fact_path)
         make_summary(spark).write.mode("overwrite").parquet(summary_path)
         return fact_path, summary_path
-
-    def _base_patches(self):
-        """Context managers that mock every external call in run_all_loads."""
-        return [
-            patch("load.load_fact_order_items",    return_value=2),
-            patch("load.load_daily_category_sales", return_value=2),
-            patch("load.log_run_start"),
-            patch("load.log_run_end"),
-        ]
 
     def test_returns_rows_extracted_and_loaded(self, spark, parquet_paths):
         from load import run_all_loads
